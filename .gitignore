@@ -1,0 +1,14 @@
+go.work
+go.work.sum
+
+# Cloned repos
+pipeline/
+triggers/
+chains/
+cli/
+results/
+operator/
+pipelines-as-code/
+dashboard/
+plumbing/
+pruner/

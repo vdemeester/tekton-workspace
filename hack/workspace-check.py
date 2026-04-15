@@ -28,7 +28,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -108,21 +107,41 @@ def detect_replace_conflicts(repos_dir: Path, repos: list[str]) -> list[ReplaceC
 
 # --- Build checking ---
 
+def detect_max_go_version(repos_dir: Path, repos: list[str]) -> str:
+    """Find the highest Go version across all repos' go.mod files."""
+    versions = []
+    for repo in repos:
+        gomod = repos_dir / repo / "go.mod"
+        if not gomod.exists():
+            continue
+        result = subprocess.run(
+            ["go", "mod", "edit", "-json", str(gomod)],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            if go_ver := data.get("Go"):
+                versions.append(go_ver)
+    if not versions:
+        return "1.25.8"
+    # Sort as tuples for proper version comparison
+    return max(versions, key=lambda v: tuple(int(x) for x in v.split(".") if x.isdigit()))
+
+
 def create_workspace(
-    workspace_dir: Path,
     repos_dir: Path,
     repos: list[str],
-    go_version: str = "1.25.7",
+    go_version: str | None = None,
 ) -> str:
-    """Create a go.work file and return its content."""
+    """Create a go.work file in repos_dir and return its content."""
+    if go_version is None:
+        go_version = detect_max_go_version(repos_dir, repos)
     lines = [f"go {go_version}", "", "use ("]
     for repo in repos:
-        # Compute relative path from workspace_dir to repos_dir/repo
-        rel = os.path.relpath(repos_dir / repo, workspace_dir)
-        lines.append(f"\t{rel}")
+        lines.append(f"\t./{repo}")
     lines.append(")")
     content = "\n".join(lines) + "\n"
-    (workspace_dir / "go.work").write_text(content)
+    (repos_dir / "go.work").write_text(content)
     return content
 
 
@@ -132,6 +151,11 @@ def classify_error(stderr: str) -> tuple[str, str]:
     Returns (error_type, summary).
     """
     lines = stderr.strip().splitlines()
+
+    # Go version mismatch in go.work
+    for line in lines:
+        if "requires go >=" in line and "go.work lists" in line:
+            return "go_version", line.strip()
 
     # Replace conflict
     for line in lines:
@@ -170,12 +194,14 @@ def classify_error(stderr: str) -> tuple[str, str]:
 
 
 def check_repo_build(
-    workspace_dir: Path,
     repos_dir: Path,
     repo: str,
     build_target: str = "./cmd/...",
 ) -> BuildResult:
-    """Try to build a repo within the workspace context."""
+    """Try to build a repo within the workspace context.
+
+    Expects a go.work file in repos_dir.
+    """
     repo_dir = repos_dir / repo
 
     # Try ./cmd/... first, fall back to ./... if no cmd dir
@@ -189,7 +215,7 @@ def check_repo_build(
         capture_output=True,
         text=True,
         cwd=str(repo_dir),
-        env={**os.environ, "GOWORK": str(workspace_dir / "go.work")},
+        env={**os.environ, "GOWORK": str(repos_dir / "go.work")},
         timeout=300,
     )
 
@@ -250,16 +276,15 @@ def run_checks(
     workspace_repos = [r for r in repos if r not in conflicting_repos]
 
     # 3. Create workspace and build
-    with tempfile.TemporaryDirectory(prefix="tekton-workspace-") as tmpdir:
-        workspace_dir = Path(tmpdir)
-        go_work_content = create_workspace(workspace_dir, repos_dir, workspace_repos)
+    go_work_content = create_workspace(repos_dir, workspace_repos)
 
-        build_results = []
+    build_results = []
 
+    try:
         # Build repos that are in the workspace
         for repo in workspace_repos:
             print(f"  → Building {repo}...", file=sys.stderr)
-            result = check_repo_build(workspace_dir, repos_dir, repo)
+            result = check_repo_build(repos_dir, repo)
             build_results.append(result)
 
         # Report excluded repos as replace_conflict failures
@@ -274,6 +299,14 @@ def run_checks(
                 error_type="replace_conflict",
                 error_summary=f"Excluded from workspace — conflicting replaces for {mods}",
             ))
+    finally:
+        # Clean up generated go.work
+        go_work = repos_dir / "go.work"
+        go_work_sum = repos_dir / "go.work.sum"
+        if go_work.exists():
+            go_work.unlink()
+        if go_work_sum.exists():
+            go_work_sum.unlink()
 
     # Sort: successes first, then by repo name
     build_results.sort(key=lambda r: (not r.success, r.repo))
@@ -298,6 +331,7 @@ def _c(code: str, text: str) -> str:
 
 
 ERROR_TYPE_LABELS = {
+    "go_version": "Go Version Mismatch",
     "replace_conflict": "Replace Conflict",
     "missing_module": "Missing Module",
     "api_break": "API Break",

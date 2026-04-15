@@ -64,6 +64,35 @@ Find where repos have diverged on shared dependencies:
 ./hack/dependency-drift.py --format markdown --fix
 ```
 
+## Dependency Alignment
+
+Bring repos into alignment on shared core dependencies:
+
+```bash
+# Show what needs aligning (dry-run)
+./hack/align-deps.py
+
+# Focus on k8s deps
+./hack/align-deps.py --group k8s
+
+# Focus on knative deps
+./hack/align-deps.py --group knative
+
+# Align specific repos
+./hack/align-deps.py operator results
+
+# Actually apply the changes
+./hack/align-deps.py --group knative --apply
+
+# Apply and verify builds
+./hack/align-deps.py --group knative --apply --verify
+```
+
+The tool detects:
+- **Version drift** — repos using different versions of the same dependency
+- **Downgrading replaces** — `replace` directives that pin shared deps to older
+  versions, breaking other repos in a workspace
+
 ## Workspace Compatibility Check
 
 Actually build repos together and catch real breakage:

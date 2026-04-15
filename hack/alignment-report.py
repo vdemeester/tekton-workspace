@@ -47,6 +47,9 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 def find_existing_prs(repos: list[str], modules_by_repo: dict[str, list[str]]) -> dict[str, list[dict]]:
     """Find open PRs that already bump needed modules.
 
+    Uses GitHub search API directly (works with public repos, no special auth).
+    Falls back to gh CLI if available.
+
     Returns {repo: [{title, url, modules_bumped}]}.
     """
     results: dict[str, list[dict]] = {}
@@ -56,20 +59,8 @@ def find_existing_prs(repos: list[str], modules_by_repo: dict[str, list[str]]) -
         if not needed_modules:
             continue
 
-        # Search for open dependency PRs
-        r = run([
-            "gh", "pr", "list",
-            "-R", f"{GITHUB_ORG}/{repo}",
-            "--json", "title,url,body,labels",
-            "--search", "bump is:open",
-            "--limit", "30",
-        ])
-        if r.returncode != 0:
-            continue
-
-        try:
-            prs = json.loads(r.stdout)
-        except json.JSONDecodeError:
+        prs = _fetch_prs_gh_api(repo) or _fetch_prs_api(repo)
+        if not prs:
             continue
 
         matching = []
@@ -78,7 +69,6 @@ def find_existing_prs(repos: list[str], modules_by_repo: dict[str, list[str]]) -
             body = pr.get("body", "") or ""
             text = f"{title} {body}"
 
-            # Check which needed modules this PR bumps
             bumped = [m for m in needed_modules if m in text]
             if bumped:
                 matching.append({
@@ -91,6 +81,47 @@ def find_existing_prs(repos: list[str], modules_by_repo: dict[str, list[str]]) -
             results[repo] = matching
 
     return results
+
+
+def _fetch_prs_gh_api(repo: str) -> list[dict] | None:
+    """Fetch open PRs via `gh api` (works in CI with GITHUB_TOKEN, handles auth)."""
+    import urllib.parse
+    query = urllib.parse.quote(f"repo:{GITHUB_ORG}/{repo} is:pr is:open bump in:title")
+    r = run([
+        "gh", "api", f"search/issues?q={query}&per_page=30",
+        "--jq", '.items[] | {title, url: .html_url, body}',
+    ])
+    if r.returncode != 0:
+        return None
+    # gh --jq outputs one JSON object per line
+    prs = []
+    for line in r.stdout.strip().splitlines():
+        if line.strip():
+            try:
+                prs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return prs or None
+
+
+def _fetch_prs_api(repo: str) -> list[dict] | None:
+    """Fallback: fetch via urllib (no auth, lower rate limit)."""
+    import urllib.request
+    import urllib.parse
+
+    query = urllib.parse.quote(f"repo:{GITHUB_ORG}/{repo} is:pr is:open bump in:title")
+    url = f"https://api.github.com/search/issues?q={query}&per_page=30"
+
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            return [
+                {"title": item["title"], "url": item["html_url"], "body": item.get("body", "")}
+                for item in data.get("items", [])
+            ]
+    except Exception:
+        return None
 
 
 def get_go_mod_diff(repos_dir: Path, repo: str) -> str | None:

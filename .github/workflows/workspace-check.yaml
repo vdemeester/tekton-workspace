@@ -60,11 +60,12 @@ jobs:
             const report = fs.readFileSync('workspace-check.md', 'utf8');
             const label = 'workspace-compat';
 
-            // Extract counts from build results table
-            const okCount = (report.match(/✅/g) || []).length;
-            const failCount = (report.match(/❌/g) || []).length;
+            // Extract compatible count from summary table
+            const compatMatch = report.match(/Compatible repos \| [^\d]*(\d+)\/(\d+)/);
+            const okCount = compatMatch ? parseInt(compatMatch[1]) : 0;
+            const totalCount = compatMatch ? parseInt(compatMatch[2]) : 0;
 
-            const title = `🔨 Workspace Compatibility — ${okCount}/${okCount + failCount} repos build together`;
+            const title = `🔨 Workspace Compatibility — ${okCount}/${totalCount} repos build together`;
 
             // Ensure label exists
             try {

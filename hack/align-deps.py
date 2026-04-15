@@ -93,6 +93,34 @@ def parse_go_version(v: str) -> tuple:
     return (0, 0, 0, 0, v)
 
 
+def _major_version(v: str) -> int:
+    """Extract major version number. v0.35.3 -> 0, v1.5.2 -> 1."""
+    v = v.lstrip("v")
+    m = re.match(r"(\d+)\.", v)
+    return int(m.group(1)) if m else 0
+
+
+def _pick_target_version(repo_versions: dict[str, str]) -> str:
+    """Pick the alignment target version, respecting major version boundaries.
+
+    When repos are split across major versions (e.g. k8s.io/client-go v0.35.x
+    vs v1.5.x), align to the highest version in the majority group.
+    """
+    # Group by major version
+    by_major: dict[int, list[str]] = defaultdict(list)
+    for ver in repo_versions.values():
+        by_major[_major_version(ver)].append(ver)
+
+    if len(by_major) == 1:
+        # All same major — just pick highest
+        return max(repo_versions.values(), key=parse_go_version)
+
+    # Multiple majors — pick the one with the most repos
+    majority_major = max(by_major, key=lambda m: len(by_major[m]))
+    majority_versions = by_major[majority_major]
+    return max(majority_versions, key=parse_go_version)
+
+
 # --- Data types ---
 
 @dataclass
@@ -170,12 +198,13 @@ def build_alignment_plan(
         if len(repo_versions) < 2:
             continue
 
-        # Find highest version
+        # Find highest version, but respect major version boundaries
+        # e.g. k8s.io/client-go v0.35.3 vs v1.5.2 are different version lines
         unique_versions = set(repo_versions.values())
         if len(unique_versions) < 2:
             continue  # already aligned
 
-        target_version = max(unique_versions, key=parse_go_version)
+        target_version = _pick_target_version(repo_versions)
 
         for repo, current_ver in sorted(repo_versions.items()):
             # Filter by target repos if specified
@@ -278,6 +307,19 @@ def verify_builds(repos_dir: Path, repos: list[str]) -> list[str]:
     messages = []
     for repo in sorted(repos):
         repo_dir = repos_dir / repo
+
+        # Re-vendor if the repo uses vendor/
+        if (repo_dir / "vendor").exists():
+            messages.append(f"  → {repo}: re-vendoring...")
+            vr = subprocess.run(
+                ["go", "mod", "vendor"],
+                cwd=str(repo_dir), capture_output=True, text=True,
+                timeout=300,
+            )
+            if vr.returncode != 0:
+                messages.append(f"  ✗ {repo}: go mod vendor failed — {vr.stderr.strip().splitlines()[-1][:200]}")
+                continue
+
         target = "./cmd/..." if (repo_dir / "cmd").exists() else "./..."
         result = subprocess.run(
             ["go", "build", target],
